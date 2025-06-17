@@ -19,6 +19,12 @@ const env = cleanEnv(process.env, {
   YOUTUBE_API_KEY: str(),
 });
 
+app.use(cors({
+  origin: ['http://localhost:5173', 'https://focuslearn-frontend.onrender.com'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  allowedHeaders: ['Content-Type']
+}));
+
 // rate limiting middleware
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
