@@ -1,34 +1,16 @@
-const { exec } = require('child_process');
-const util = require('util');
-const execPromise = util.promisify(exec);
+const ytDlp = require('yt-dlp-exec');
 const path = require('path');
-const fs = require('fs').promises;
+const fs = require('fs');
+const fsPromises = require('fs').promises;
+const AWS = require('aws-sdk');
 const ffmpeg = require('fluent-ffmpeg');
-const winston = require('winston');
+const { logger } = require('../config/logger');
 
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.File({ filename: 'error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'combined.log' }),
-    new winston.transports.Console()
-  ]
+const s3 = new AWS.S3({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION
 });
-
-async function checkDependencies() {
-  try {
-    await execPromise('yt-dlp --version');
-    await execPromise('ffmpeg -version');
-    logger.info('Dependencies checked: yt-dlp and ffmpeg are available');
-  } catch (error) {
-    logger.error('Dependency check failed:', error);
-    throw new Error('Required dependencies (yt-dlp or ffmpeg) are missing');
-  }
-}
 
 async function segmentAudio(inputFile, outputTemplate, segmentTime = 60) {
   return new Promise((resolve, reject) => {
@@ -42,10 +24,10 @@ async function segmentAudio(inputFile, outputTemplate, segmentTime = 60) {
       ])
       .output(outputTemplate)
       .on('start', (commandLine) => {
-        logger.info(`FFmpeg segmentation command: ${commandLine}`);
+        logger.debug(`FFmpeg segmentation command: ${commandLine}`);
       })
       .on('progress', (progress) => {
-        logger.info(`Segmentation progress for ${inputFile}: ${progress.percent}%`);
+        logger.debug(`Segmentation progress for ${inputFile}: ${progress.percent}%`);
       })
       .on('error', (err) => {
         logger.error(`Segmentation error for ${inputFile}:`, err);
@@ -54,7 +36,7 @@ async function segmentAudio(inputFile, outputTemplate, segmentTime = 60) {
       .on('end', async () => {
         logger.info(`Segmentation completed for ${inputFile}`);
         const dir = path.dirname(outputTemplate);
-        const files = await fs.readdir(dir);
+        const files = await fsPromises.readdir(dir);
         for (const file of files) {
           if (file.match(/audio_.*_\d{3}\.wav$/) && !file.includes('_preprocessed')) {
             chunks.push(path.join(dir, file));
@@ -68,7 +50,6 @@ async function segmentAudio(inputFile, outputTemplate, segmentTime = 60) {
 }
 
 async function extractAudio(videoUrl) {
-  await checkDependencies();
   const outputDir = path.join(__dirname, '..', 'temp');
   const videoId = videoUrl.match(/v=([^&]+)/)?.[1];
   if (!videoId) {
@@ -77,34 +58,56 @@ async function extractAudio(videoUrl) {
   }
   const tempFile = path.join(outputDir, `audio_${videoId}.mp3`).replace(/\\/g, '/');
   const outputTemplate = path.join(outputDir, `audio_${videoId}_%03d.wav`).replace(/\\/g, '/');
+  const s3Bucket = process.env.AWS_S3_BUCKET;
 
   try {
-    await fs.mkdir(outputDir, { recursive: true });
+    await fsPromises.mkdir(outputDir, { recursive: true });
 
-    // clean up existing files for this videoId
-    const existingFiles = await fs.readdir(outputDir).catch(() => []);
+    const existingFiles = await fsPromises.readdir(outputDir).catch(() => []);
     for (const file of existingFiles) {
       if (file.includes(videoId) && (file.endsWith('.wav') || file.endsWith('.mp3'))) {
         try {
-          await fs.unlink(path.join(outputDir, file));
-          logger.info(`Deleted old file: ${file}`);
+          await fsPromises.unlink(path.join(outputDir, file));
+          logger.debug(`Deleted local file: ${file}`);
         } catch (err) {
-          logger.warn(`Failed to delete old file ${file}:`, err.message);
+          logger.warn(`Failed to delete local file ${file}:`, err.message);
         }
       }
     }
 
+    const s3Objects = await s3.listObjectsV2({
+      Bucket: s3Bucket,
+      Prefix: `audio_${videoId}`
+    }).promise();
+    if (s3Objects.Contents?.length > 0) {
+      await s3.deleteObjects({
+        Bucket: s3Bucket,
+        Delete: {
+          Objects: s3Objects.Contents.map(obj => ({ Key: obj.Key }))
+        }
+      }).promise();
+      logger.debug(`Deleted ${s3Objects.Contents.length} S3 objects for ${videoId}`);
+    }
+
     logger.info(`Extracting audio for ${videoUrl}`);
-    // download audio as mp3
-    const command = `yt-dlp -x --audio-format mp3 -o "${tempFile}" "${videoUrl}"`;
-    const { stdout, stderr } = await execPromise(command);
-    logger.info(`yt-dlp output for ${videoId}: ${stdout}`);
-    if (stderr) logger.warn(`yt-dlp warnings for ${videoId}: ${stderr}`);
+    await ytDlp(videoUrl, {
+      extractAudio: true,
+      audioFormat: 'mp3',
+      output: tempFile
+    });
+    logger.debug(`yt-dlp-exec downloaded audio for ${videoId} to ${tempFile}`);
 
-    // verify temp file exists
-    await fs.access(tempFile);
+    await fsPromises.access(tempFile);
 
-    // segment audio using fluent-ffmpeg
+    const mp3Key = `audio_${videoId}.mp3`;
+    await s3.upload({
+      Bucket: s3Bucket,
+      Key: mp3Key,
+      Body: fs.createReadStream(tempFile),
+      ContentType: 'audio/mpeg'
+    }).promise();
+    logger.debug(`Uploaded ${mp3Key} to S3 bucket ${s3Bucket}`);
+
     const audioChunks = await segmentAudio(tempFile, outputTemplate, 60);
     if (audioChunks.length === 0) {
       logger.error(`No audio chunks created for ${videoId}`);
@@ -113,43 +116,68 @@ async function extractAudio(videoUrl) {
     if (audioChunks.length === 1) {
       logger.warn(`Only one audio chunk created for ${videoId}. Video may be short or segmentation failed.`);
     }
+
+    const s3Keys = [];
+    for (const chunk of audioChunks) {
+      const chunkKey = `audio_${videoId}_${path.basename(chunk)}`;
+      await s3.upload({
+        Bucket: s3Bucket,
+        Key: chunkKey,
+        Body: fs.createReadStream(chunk),
+        ContentType: 'audio/wav'
+      }).promise();
+      logger.debug(`Uploaded ${chunkKey} to S3 bucket ${s3Bucket}`);
+      s3Keys.push(chunkKey);
+    }
+
     logger.info(`Extracted ${audioChunks.length} audio chunks for ${videoId}: ${audioChunks.join(', ')}`);
-    return audioChunks;
+    return s3Keys.map(key => `s3://${s3Bucket}/${key}`);
   } catch (error) {
     logger.error(`Audio extraction failed for ${videoId}:`, error);
     throw new Error(`Failed to extract audio: ${error.message}`);
   } finally {
-    // clean up temp mp3 file
     try {
-      await fs.unlink(tempFile);
-      logger.info(`Deleted temp file: ${tempFile}`);
+      await fsPromises.unlink(tempFile);
+      logger.debug(`Deleted local temp file: ${tempFile}`);
     } catch (err) {
       if (err.code !== 'ENOENT') {
-        logger.warn(`Failed to delete temp file ${tempFile}:`, err.message);
+        logger.warn(`Failed to delete local temp file ${tempFile}:`, err.message);
+      }
+    }
+    const localChunks = await fsPromises.readdir(outputDir).catch(() => []);
+    for (const file of localChunks) {
+      if (file.includes(videoId) && file.endsWith('.wav')) {
+        try {
+          await fsPromises.unlink(path.join(outputDir, file));
+          logger.debug(`Deleted local chunk: ${file}`);
+        } catch (err) {
+          logger.warn(`Failed to delete local chunk ${file}:`, err.message);
+        }
       }
     }
   }
 }
 
-async function cleanupAudio(audioFiles) {
+async function cleanupAudio(s3Uris) {
+  const s3Bucket = process.env.AWS_S3_BUCKET;
   const maxRetries = 3;
-  for (const file of audioFiles) {
+
+  for (const uri of s3Uris) {
+    const key = uri.replace(`s3://${s3Bucket}/`, '');
     let attempts = 0;
     while (attempts < maxRetries) {
       try {
-        await fs.access(file);
-        await fs.unlink(file);
-        logger.info(`Deleted audio file: ${file}`);
+        await s3.deleteObject({
+          Bucket: s3Bucket,
+          Key: key
+        }).promise();
+        logger.debug(`Deleted S3 object: ${key}`);
         break;
       } catch (err) {
         attempts++;
-        if (err.code === 'ENOENT') {
-          logger.warn(`File ${file} already deleted or does not exist`);
-          break;
-        }
-        logger.warn(`Failed to delete ${file} (attempt ${attempts}):`, err.message);
+        logger.warn(`Failed to delete S3 object ${key} (attempt ${attempts}):`, err.message);
         if (attempts >= maxRetries) {
-          logger.error(`Failed to delete ${file} after ${maxRetries} attempts`);
+          logger.error(`Failed to delete S3 object ${key} after ${maxRetries} attempts`);
         }
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
