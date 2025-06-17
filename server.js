@@ -17,38 +17,39 @@ const env = cleanEnv(process.env, {
   MONGODB_URI: str(),
   GROQ_API_KEY: str(),
   YOUTUBE_API_KEY: str(),
+  AWS_ACCESS_KEY_ID: str(),
+  AWS_SECRET_ACCESS_KEY: str(),
+  AWS_REGION: str(),
+  AWS_S3_BUCKET: str()
 });
 
 app.use(cors({
   origin: ['http://localhost:5173', 'https://focuslearntube.onrender.com'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-  allowedHeaders: ['Content-Type']
+  allowedHeaders: ['Content-Type'],
+  credentials: true
 }));
 
-// rate limiting middleware
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 50,
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.url.startsWith('/video/fetch')
 });
 app.use(limiter);
 
-// middleware
-app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// connect MongoDB
 connectDB();
 
-// API Routes
-app.use('/', videoRoutes);
-app.use('/', playlistRoutes);
-app.use('/', queryRoutes);
-app.use('/', noteRoutes);
+app.get('/health', (req, res) => res.status(200).json({ status: 'OK' }));
+app.use('/video', videoRoutes);
+app.use('/playlist', playlistRoutes);
+app.use('/query', queryRoutes);
+app.use('/notes', noteRoutes);
 
-// error handling
 app.use((err, req, res, next) => {
   logger.error(`Global error: ${err.message}, Stack: ${err.stack}`);
   res.status(500).json({ error: 'Internal server error', details: err.message });
