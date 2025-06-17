@@ -20,7 +20,7 @@ const env = cleanEnv(process.env, {
 });
 
 app.use(cors({
-  origin: ['http://localhost:5173', 'https://focuslearn-frontend.onrender.com'],
+  origin: ['http://localhost:5173', 'https://focuslearntube.onrender.com'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type']
 }));
