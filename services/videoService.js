@@ -1,39 +1,31 @@
 const axios = require('axios');
-const VideoMetadata = require('../models/VideoMetadata');
+const winston = require('winston');
+
+const { logger } = require('../config/logger');
 
 async function fetchVideoDetails(videoId) {
   try {
-    const cached = await VideoMetadata.findOne({ videoId });
-    if (cached) return cached;
-
-    const response = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+    const response = await axios.get('https://142.250.190.78/youtube/v3/videos', {
       params: {
         part: 'snippet',
         id: videoId,
         key: process.env.YOUTUBE_API_KEY
-      }
+      },
+      headers: { Host: 'www.googleapis.com' } // Spoof host header
     });
-
-    const video = response.data.items[0]?.snippet;
-    if (!video) throw new Error('Video not found');
-
-    const metadata = {
-      videoId,
-      title: video.title,
-      description: video.description
+    if (response.data.items.length === 0) {
+      throw new Error('Video not found');
+    }
+    const videoDetails = response.data.items[0].snippet;
+    return {
+      title: videoDetails.title,
+      description: videoDetails.description,
+      thumbnail: videoDetails.thumbnails?.medium?.url
     };
-
-    await VideoMetadata.create(metadata);
-    return metadata;
   } catch (error) {
-    console.error('YouTube API error:', error);
+    logger.error(`YouTube API error:`, error);
     throw new Error('Failed to fetch video details');
   }
 }
 
-async function getVideoTitle(videoId) {
-  const details = await fetchVideoDetails(videoId);
-  return details?.title || null;
-}
-
-module.exports = { fetchVideoDetails, getVideoTitle };
+module.exports = { fetchVideoDetails };
