@@ -7,19 +7,14 @@ const Transcript = require('../models/Transcript');
 const { fetchVideoDetails } = require('./videoService');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
-const winston = require('winston');
+const path = require('path');
+const AWS = require('aws-sdk');
+const { logger } = require('../config/logger');
 
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.File({ filename: 'error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'combined.log' }),
-    new winston.transports.Console()
-  ]
+const s3 = new AWS.S3({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION
 });
 
 async function fetchTranscript(videoId, language = 'en') {
@@ -90,8 +85,8 @@ async function fetchTranscript(videoId, language = 'en') {
 
 async function generateWhisperTranscript(videoId, language) {
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  let audioChunks = [];
-  let preprocessedChunks = [];
+  let s3Uris = [];
+  const outputDir = path.join(__dirname, '..', 'temp');
 
   try {
     logger.info(`Fetching video details for ${videoId}`);
@@ -100,43 +95,48 @@ async function generateWhisperTranscript(videoId, language) {
     logger.info(`Video title: ${prompt}`);
 
     logger.info(`Extracting audio for ${videoUrl}`);
-    audioChunks = await extractAudio(videoUrl);
-    logger.info(`Extracted ${audioChunks.length} audio chunks`);
+    s3Uris = await extractAudio(videoUrl);
+    logger.info(`Extracted ${s3Uris.length} audio chunks`);
 
-    // Filter chunks to include only those for the current videoId
-    audioChunks = audioChunks.filter(chunk => chunk.includes(`audio_${videoId}_`));
-    logger.info(`Filtered to ${audioChunks.length} chunks for ${videoId}: ${audioChunks.join(', ')}`);
+    await fsPromises.mkdir(outputDir, { recursive: true });
 
-    const preprocessPromises = audioChunks.map(async (chunk) => {
-      if (chunk.includes('_preprocessed')) return chunk;
-      const preprocessedFile = chunk.replace('.wav', '_preprocessed.wav');
-      logger.info(`Preprocessing ${chunk} to ${preprocessedFile}`);
-      try {
-        await preprocessAudio(chunk, preprocessedFile);
-        await fsPromises.access(preprocessedFile); // Verify file exists
-        return preprocessedFile;
-      } catch (error) {
-        logger.error(`Preprocessing failed for ${chunk}:`, error);
-        throw new Error(`Audio preprocessing failed: ${error.message}`);
-      }
-    });
-    preprocessedChunks = await Promise.all(preprocessPromises);
-    logger.info(`Preprocessed ${preprocessedChunks.length} chunks`);
+    const localFiles = [];
+    for (const uri of s3Uris) {
+      const key = uri.replace(`s3://${process.env.AWS_S3_BUCKET}/`, '');
+      const localFile = path.join(outputDir, path.basename(key));
+      logger.debug(`Downloading ${key} from S3 to ${localFile}`);
+      const s3Data = await s3.getObject({
+        Bucket: process.env.AWS_S3_BUCKET,
+        Key: key
+      }).promise();
+      await fsPromises.writeFile(localFile, s3Data.Body);
+      localFiles.push(localFile);
+    }
+
+    const preprocessedFiles = [];
+    for (const localFile of localFiles) {
+      const preprocessedFile = localFile.replace('.wav', '_preprocessed.wav');
+      logger.debug(`Preprocessing ${localFile} to ${preprocessedFile}`);
+      await preprocessAudio(localFile, preprocessedFile);
+      await fsPromises.access(preprocessedFile);
+      await fsPromises.unlink(localFile);
+      logger.debug(`Deleted original local file: ${localFile}`);
+      preprocessedFiles.push(preprocessedFile);
+    }
 
     let fullTranscript = [];
     let offset = 0;
-    for (const chunk of preprocessedChunks) {
-      logger.info(`Transcribing chunk ${chunk}`);
+    for (const localFile of preprocessedFiles) {
+      let segments = [];
       let attempts = 0;
       const maxRetries = 3;
       while (attempts < maxRetries) {
         try {
-          // Verify file exists before transcription
-          await fsPromises.access(chunk);
+          await fsPromises.access(localFile);
           const startTime = Date.now();
-          const stream = fs.createReadStream(chunk);
+          const stream = fs.createReadStream(localFile);
           stream.on('error', (err) => {
-            logger.error(`Stream error for ${chunk}:`, err);
+            logger.error(`Stream error for ${localFile}:`, err);
             throw new Error(`Failed to read audio file: ${err.message}`);
           });
           const transcription = await Promise.race([
@@ -148,43 +148,39 @@ async function generateWhisperTranscript(videoId, language) {
               prompt,
               temperature: 0
             }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Transcription timeout')), 60000)) // 60-second timeout
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Transcription timeout')), 60000))
           ]);
-          logger.info(`Transcription for ${chunk} took ${Date.now() - startTime}ms: ${transcription.segments.length} segments`);
-          const segments = transcription.segments.filter(
+          logger.debug(`Transcription for ${localFile} took ${Date.now() - startTime}ms: ${transcription.segments.length} segments`);
+          segments = transcription.segments.filter(
             segment => segment.avg_logprob > -0.4 && segment.no_speech_prob < 0.4
-          );
-          fullTranscript.push(
-            ...segments.map(segment => ({
-              text: segment.text,
-              offset: (segment.start + offset) * 1000,
-              duration: (segment.end - segment.start) * 1000
-            }))
-          );
-          offset += segments[segments.length - 1]?.end || 60; // Match segment_time
+          ).map(segment => ({
+            text: segment.text,
+            offset: (segment.start + offset) * 1000,
+            duration: (segment.end - segment.start) * 1000
+          }));
+          offset += segments[segments.length - 1]?.end || 60;
           break;
         } catch (error) {
           attempts++;
-          logger.error(`Transcription attempt ${attempts} failed for ${chunk}: ${error.message}`);
+          logger.error(`Transcription attempt ${attempts} failed for ${localFile}: ${error.message}`);
           if (error.status === 429 || error.message.includes('rate_limit') || error.message === 'Transcription timeout') {
             const retryAfter = parseInt(error.headers?.['retry-after']) * 1000 || Math.pow(2, attempts) * 1000;
             logger.warn(`Retryable error, retrying after ${retryAfter}ms`);
             if (attempts >= maxRetries) {
               throw new Error(`Transcription failed after ${maxRetries} retries: ${error.message}`);
             }
-            // Verify file still exists before retry
-            try {
-              await fsPromises.access(chunk);
-            } catch (err) {
-              logger.error(`File ${chunk} missing before retry:`, err);
-              throw new Error(`Audio file missing: ${err.message}`);
-            }
             await new Promise(resolve => setTimeout(resolve, retryAfter));
           } else {
             throw new Error(`Whisper transcription failed: ${error.message}`);
           }
+        } finally {
+          if (fs.existsSync(localFile)) {
+            await fsPromises.unlink(localFile);
+            logger.debug(`Deleted local file: ${localFile}`);
+          }
         }
       }
+      fullTranscript.push(...segments);
     }
 
     if (fullTranscript.length > 0) {
@@ -196,22 +192,35 @@ async function generateWhisperTranscript(videoId, language) {
         const length = item.text.length;
         const refinedSegment = refinedText.slice(refinedIndex, refinedIndex + length);
         refinedIndex += length;
+        logger.debug(`Refined segment for ${item.text}: ${refinedSegment}`);
         return { ...item, text: refinedSegment };
       });
       logger.info(`Final transcript generated with ${finalTranscript.length} segments`);
       return finalTranscript;
     }
 
-    throw new Error('No valid transcript generated');
+    throw new Error('No valid transcript found');
   } catch (error) {
     logger.error(`Whisper transcription failed for ${videoId}:`, error);
     throw new Error(`Failed to generate transcript: ${error.message}`);
   } finally {
-    // Only cleanup after all transcription attempts
-    if (audioChunks.length > 0 || preprocessedChunks.length > 0) {
-      logger.info(`Cleaning up ${audioChunks.length + preprocessedChunks.length} audio files`);
-      await cleanupAudio([...audioChunks, ...preprocessedChunks]);
+    if (s3Uris.length > 0) {
+      logger.debug(`Cleaning up ${s3Uris.length} S3 objects`);
+      await cleanupAudio(s3Uris);
     }
+    const localFiles = await fsPromises.readdir(outputDir).catch(() => []);
+    await Promise.all(localFiles.map(async (file) => {
+      if (file.includes(videoId) && (file.endsWith('.wav') || file.endsWith('.mp3'))) {
+        try {
+          await fsPromises.unlink(path.join(outputDir, file));
+          logger.debug(`Deleted local file: ${file}`);
+        } catch (err) {
+          if (err.code !== 'ENOENT') {
+            logger.warn(`Failed to delete local file ${file}:`, err.message);
+          }
+        }
+      }
+    }));
   }
 }
 
@@ -231,13 +240,13 @@ async function refineTranscript(rawText, videoTitle) {
         max_tokens: 4000,
         temperature: 0
       }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Refinement timeout')), 60000)) // 60-second timeout
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Refinement timeout')), 60000))
     ]);
     logger.info(`Refined transcript received`);
     return response.choices[0]?.message?.content || rawText;
   } catch (error) {
-    logger.error('Transcript refinement failed:', error);
-    return rawText; // fallback to raw text
+    logger.warn(`Transcript refinement failed: ${error.message}`);
+    return rawText;
   }
 }
 
