@@ -24,19 +24,19 @@ const env = cleanEnv(process.env, {
 });
 
 app.use(cors({
-  origin: ['http://localhost:5173', 'https://focuslearntube.onrender.com'],
+  origin: [process.env.FRONTEND_URL || 'http://localhost:5173', 'https://focuslearntube.onrender.com'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type'],
-  credentials: true
+  credentials: false 
 }));
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 50,
+  max: 60,
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.url.startsWith('/video/fetch')
+  skip: (req) => req.url === '/fetch_video'  || req.url === '/fetch_playlist'
 });
 app.use(limiter);
 
@@ -45,10 +45,10 @@ app.use(express.json({ limit: '10mb' }));
 connectDB();
 
 app.get('/health', (req, res) => res.status(200).json({ status: 'OK' }));
-app.use('/video', videoRoutes);
-app.use('/playlist', playlistRoutes);
-app.use('/query', queryRoutes);
-app.use('/notes', noteRoutes);
+app.use('/', videoRoutes);
+app.use('/', playlistRoutes);
+app.use('/', queryRoutes);
+app.use('/', noteRoutes);
 
 app.use((err, req, res, next) => {
   logger.error(`Global error: ${err.message}, Stack: ${err.stack}`);
