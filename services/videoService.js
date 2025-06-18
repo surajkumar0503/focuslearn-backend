@@ -1,14 +1,16 @@
 const axios = require('axios');
+const winston = require('winston');
 const { logger } = require('../config/logger');
 
 async function fetchVideoDetails(videoId) {
   try {
-    const response = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+    const response = await axios.get('https://142.250.190.78/youtube/v3/videos', {
       params: {
         part: 'snippet',
         id: videoId,
         key: process.env.YOUTUBE_API_KEY
-      }
+      },
+      headers: { Host: 'www.googleapis.com' } 
     });
     if (response.data.items.length === 0) {
       throw new Error('Video not found');
@@ -20,7 +22,7 @@ async function fetchVideoDetails(videoId) {
       thumbnail: videoDetails.thumbnails?.medium?.url
     };
   } catch (error) {
-    logger.error(`YouTube API error: ${error.message}`);
+    logger.error(`YouTube API error:`, error);
     throw new Error('Failed to fetch video details');
   }
 }
