@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const Note = require('../models/Note');
-
 const sanitize = require('sanitize-html');
+const { logger } = require('../config/logger');
 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
@@ -9,7 +9,7 @@ const saveNote = async (req, res) => {
   try {
     const { videoId, content, title = "" } = req.body;
     const sanitizedContent = sanitize(content, {
-      allowedTags: [], // strip all HTML tags
+      allowedTags: [],
       allowedAttributes: {}
     });
     const sanitizedTitle = sanitize(title, {
@@ -23,17 +23,20 @@ const saveNote = async (req, res) => {
     await note.save();
     res.status(201).json({ message: "Note created successfully", note });
   } catch (err) {
-    console.error("Error saving note:", err);
+    logger.error(`Error saving note: ${err.message}`);
     res.status(500).json({ error: "Failed to save note", details: err.message });
   }
 };
 
 const getNotes = async (req, res) => {
   try {
-    const notes = await Note.find().sort({ createdAt: -1 });
+    const notes = await Note.find().sort({ createdAt: -1 }).lean();
+    if (!notes) {
+      return res.status(404).json({ error: "No notes found" });
+    }
     res.status(200).json(notes);
   } catch (err) {
-    console.error("Error fetching notes:", err);
+    logger.error(`Error fetching notes: ${err.message}`);
     res.status(500).json({ error: "Failed to fetch notes", details: err.message });
   }
 };
@@ -50,7 +53,7 @@ const deleteNote = async (req, res) => {
     }
     res.status(200).json({ message: "Note deleted successfully" });
   } catch (err) {
-    console.error("Error deleting note:", err);
+    logger.error(`Error deleting note: ${err.message}`);
     res.status(500).json({ error: "Failed to delete note", details: err.message });
   }
 };
@@ -75,7 +78,7 @@ const updateNote = async (req, res) => {
     }
     res.status(200).json({ message: "Note updated successfully", note });
   } catch (err) {
-    console.error("Error updating note:", err);
+    logger.error(`Error updating note: ${err.message}`);
     res.status(500).json({ error: "Failed to update note", details: err.message });
   }
 };
