@@ -1,5 +1,4 @@
 const axios = require('axios');
-const winston = require('winston');
 const { logger } = require('../config/logger');
 
 async function fetchVideoDetails(videoId) {
