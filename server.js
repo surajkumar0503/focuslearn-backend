@@ -25,10 +25,13 @@ const env = cleanEnv(process.env, {
 
 app.use(cors({
   origin: [process.env.FRONTEND_URL || 'http://localhost:5173', 'https://focuslearntube.onrender.com'],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-  allowedHeaders: ['Content-Type'],
-  credentials: false 
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,
+  optionsSuccessStatus: 204 
 }));
+
+app.options('*', cors());
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
