@@ -7,6 +7,11 @@ const { cleanEnv, str, port } = require('envalid');
 const { logger } = require('./config/logger');
 require('dotenv').config();
 
+if (process.env.NODE_ENV === 'production') {
+  throw new Error('Whisper transcription not available in production due to rate limits');
+}
+
+
 const videoRoutes = require('./routes/videoRoutes');
 const playlistRoutes = require('./routes/playlistRoutes');
 const queryRoutes = require('./routes/queryRoutes');
