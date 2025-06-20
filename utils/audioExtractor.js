@@ -101,6 +101,7 @@ async function extractAudio(videoUrl) {
       extractAudio: true,
       audioFormat: 'mp3',
       output: tempFile,
+      proxy: 'http://your-proxy-ip:port'
     }, {
       shell: false,
       cwd: path.dirname(ytDlpPath),
