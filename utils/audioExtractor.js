@@ -1,4 +1,4 @@
-const ytDlp = require('yt-dlp-exec');
+const ytDlpExec = require('yt-dlp-exec');
 const path = require('path');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
@@ -10,6 +10,8 @@ const { logger } = require('../config/logger');
 const ffmpegPath = path.resolve(__dirname, '../bin/ffmpeg');
 const ytDlpPath = path.resolve(__dirname, '../bin/yt-dlp');
 ffmpeg.setFfmpegPath(ffmpegPath);
+
+const ytDlp = ytDlpExec.default || ytDlpExec;
 
 const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -68,6 +70,8 @@ async function extractAudio(videoUrl) {
 
   try {
     await fsPromises.mkdir(outputDir, { recursive: true });
+
+    // Delete existing local files
     const existingFiles = await fsPromises.readdir(outputDir).catch(() => []);
     for (const file of existingFiles) {
       if (file.includes(videoId) && (file.endsWith('.wav') || file.endsWith('.mp3'))) {
@@ -80,7 +84,7 @@ async function extractAudio(videoUrl) {
       }
     }
 
-    // clean up S3 previous audio files
+    // Delete old S3 objects
     const s3Objects = await s3.listObjectsV2({
       Bucket: s3Bucket,
       Prefix: `audio_${videoId}`
@@ -95,22 +99,19 @@ async function extractAudio(videoUrl) {
       logger.debug(`Deleted ${s3Objects.Contents.length} S3 objects for ${videoId}`);
     }
 
-    // extract audio using yt-dlp with custom binary
+    // Extract audio using yt-dlp
     logger.info(`Extracting audio for ${videoUrl}`);
     await ytDlp(videoUrl, {
       extractAudio: true,
       audioFormat: 'mp3',
       output: tempFile,
-      proxy: 'http://your-proxy-ip:port'
-    }, {
-      shell: false,
-      cwd: path.dirname(ytDlpPath),
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+      referer: 'https://www.youtube.com/',
       execPath: ytDlpPath
     });
     logger.debug(`yt-dlp downloaded audio for ${videoId} to ${tempFile}`);
 
-    await fsPromises.access(tempFile);
-
+    // Upload mp3 to S3
     const mp3Key = `audio_${videoId}.mp3`;
     await s3.upload({
       Bucket: s3Bucket,
@@ -120,7 +121,7 @@ async function extractAudio(videoUrl) {
     }).promise();
     logger.debug(`Uploaded ${mp3Key} to S3 bucket ${s3Bucket}`);
 
-    // segment audio into .wav chunks
+    // Segment audio to WAV
     const audioChunks = await segmentAudio(tempFile, outputTemplate, 60);
     if (audioChunks.length === 0) {
       logger.error(`No audio chunks created for ${videoId}`);
@@ -136,17 +137,17 @@ async function extractAudio(videoUrl) {
         Body: fs.createReadStream(chunk),
         ContentType: 'audio/wav'
       }).promise();
-      logger.debug(`Uploaded ${chunkKey} to S3 bucket ${s3Bucket}`);
+      logger.debug(`Uploaded ${chunkKey} to S3`);
       s3Keys.push(chunkKey);
     }
 
-    logger.info(`Extracted and uploaded ${audioChunks.length} audio chunks for ${videoId}`);
+    logger.info(`Uploaded ${audioChunks.length} chunks to S3`);
     return s3Keys.map(key => `s3://${s3Bucket}/${key}`);
   } catch (error) {
     logger.error(`Audio extraction failed for ${videoId}:`, error);
     throw new Error(`Failed to extract audio: ${error.message}`);
   } finally {
-    // cleanup local temp files
+    // Clean up local files
     try {
       await fsPromises.unlink(tempFile);
       logger.debug(`Deleted local temp file: ${tempFile}`);
