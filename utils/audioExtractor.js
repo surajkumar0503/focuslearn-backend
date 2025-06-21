@@ -1,4 +1,4 @@
-// const ytDlpExec = require('yt-dlp-exec');
+const ytDlpExec = require('yt-dlp-exec');
 const path = require('path');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
@@ -11,6 +11,7 @@ const { spawn } = require('child_process');
 const ffmpegPath = path.resolve(__dirname, '../bin/ffmpeg');
 const ytDlpPath = path.resolve(__dirname, '../bin/yt-dlp');
 ffmpeg.setFfmpegPath(ffmpegPath);
+const ytDlp = ytDlpExec.default || ytDlpExec;
 
 const s3 = new AWS.S3({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
