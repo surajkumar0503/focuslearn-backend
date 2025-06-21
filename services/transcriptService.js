@@ -78,8 +78,8 @@ async function fetchTranscript(videoId, language = 'en') {
       return transcript;
     } catch (whisperError) {
       logger.error(`Failed to generate transcript for ${videoId}:`, whisperError);
-      // throw new Error('Failed to fetch or generate transcript');
-      throw new Error('Whisper transcription not available in production due to rate limits');
+      throw new Error('Failed to fetch or generate transcript');
+
     }
   }
 }
