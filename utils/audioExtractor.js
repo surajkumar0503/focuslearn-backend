@@ -7,8 +7,6 @@ const ffmpeg = require('fluent-ffmpeg');
 const { logger } = require('../config/logger');
 const { spawn } = require('child_process');
 
-const args = [videoUrl, '--extract-audio', '--audio-format', 'mp3', ...];
-
 const process = spawn(ytDlpPath, args);
 
 // set paths to local binaries in backend/bin
