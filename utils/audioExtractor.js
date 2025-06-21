@@ -7,13 +7,10 @@ const ffmpeg = require('fluent-ffmpeg');
 const { logger } = require('../config/logger');
 const { spawn } = require('child_process');
 
-const process = spawn(ytDlpPath, args);
-
 // set paths to local binaries in backend/bin
 const ffmpegPath = path.resolve(__dirname, '../bin/ffmpeg');
 const ytDlpPath = path.resolve(__dirname, '../bin/yt-dlp');
 ffmpeg.setFfmpegPath(ffmpegPath);
-
 const ytDlp = ytDlpExec.default || ytDlpExec;
 
 const s3 = new AWS.S3({
