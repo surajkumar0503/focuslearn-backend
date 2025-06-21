@@ -7,17 +7,40 @@ const ffmpeg = require('fluent-ffmpeg');
 const { logger } = require('../config/logger');
 const { spawn } = require('child_process');
 
-// set paths to local binaries in backend/bin
+// Set paths to local binaries in backend/bin
 const ffmpegPath = path.resolve(__dirname, '../bin/ffmpeg');
-const ytDlpPath = path.resolve(__dirname, '../bin/yt-dlp');
+const ytDlpPath = path.resolve(__dirname, '../bin/yt-dlp').replace(/\\/g, '/');
 ffmpeg.setFfmpegPath(ffmpegPath);
 const ytDlp = ytDlpExec.default || ytDlpExec;
 
+// Verify yt-dlp binary exists
+if (!fs.existsSync(ytDlpPath)) {
+  logger.error(`yt-dlp binary not found at ${ytDlpPath}`);
+  throw new Error(`yt-dlp binary not found at ${ytDlpPath}`);
+}
+
+// Initialize S3 client
 const s3 = new AWS.S3({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+  region: process.env.AWS_REGION || 'ap-south-1'
 });
+
+// Ensure cookies directory exists
+const cookiesPath = path.resolve(__dirname, '../cookies/youtube_cookies.txt').replace(/\\/g, '/');
+const cookiesDir = path.dirname(cookiesPath);
+async function ensureCookiesDir() {
+  try {
+    await fsPromises.mkdir(cookiesDir, { recursive: true });
+    if (!fs.existsSync(cookiesPath)) {
+      await fsPromises.writeFile(cookiesPath, '');
+      logger.debug(`Created empty cookies file: ${cookiesPath}`);
+    }
+  } catch (err) {
+    logger.error(`Failed to create cookies directory or file: ${err.message}`);
+    throw new Error(`Failed to initialize cookies: ${err.message}`);
+  }
+}
 
 async function segmentAudio(inputFile, outputTemplate, segmentTime = 60) {
   return new Promise((resolve, reject) => {
@@ -37,7 +60,7 @@ async function segmentAudio(inputFile, outputTemplate, segmentTime = 60) {
         logger.debug(`Segmentation progress for ${inputFile}: ${progress.percent}%`);
       })
       .on('error', (err) => {
-        logger.error(`Segmentation error for ${inputFile}:`, err);
+        logger.error(`Segmentation error for ${inputFile}: ${err.message}`);
         reject(new Error(`FFmpeg segmentation failed: ${err.message}`));
       })
       .on('end', async () => {
@@ -57,21 +80,33 @@ async function segmentAudio(inputFile, outputTemplate, segmentTime = 60) {
 }
 
 async function extractAudio(videoUrl) {
+  logger.debug(`Received videoUrl: ${videoUrl}`);
+  if (typeof videoUrl !== 'string' || !videoUrl.match(/https?:\/\/(www\.)?youtube\.com\/watch\?v=[\w-]{11}/)) {
+    logger.error(`Invalid video URL: ${JSON.stringify(videoUrl)}`);
+    throw new Error(`Invalid video URL: ${JSON.stringify(videoUrl)}`);
+  }
+
+  if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
+    logger.error('AWS credentials missing');
+    throw new Error('AWS credentials missing');
+  }
+
   const outputDir = path.join(__dirname, '..', 'temp');
   const videoId = videoUrl.match(/v=([^&]+)/)?.[1];
   if (!videoId) {
-    logger.error('Invalid video URL:', videoUrl);
-    throw new Error('Invalid video URL');
+    logger.error('Invalid video URL format:', videoUrl);
+    throw new Error('Invalid video URL format');
   }
-
   const tempFile = path.join(outputDir, `audio_${videoId}.mp3`).replace(/\\/g, '/');
   const outputTemplate = path.join(outputDir, `audio_${videoId}_%03d.wav`).replace(/\\/g, '/');
-  const s3Bucket = process.env.AWS_S3_BUCKET;
+  const s3Bucket = process.env.AWS_S3_BUCKET || 'focuslearn-audio-2025';
 
   try {
+    // Create temp and cookies directories
     await fsPromises.mkdir(outputDir, { recursive: true });
+    await ensureCookiesDir();
 
-    // Delete existing local files
+    // Clean up existing local files
     const existingFiles = await fsPromises.readdir(outputDir).catch(() => []);
     for (const file of existingFiles) {
       if (file.includes(videoId) && (file.endsWith('.wav') || file.endsWith('.mp3'))) {
@@ -79,12 +114,12 @@ async function extractAudio(videoUrl) {
           await fsPromises.unlink(path.join(outputDir, file));
           logger.debug(`Deleted local file: ${file}`);
         } catch (err) {
-          logger.warn(`Failed to delete local file ${file}:`, err.message);
+          logger.warn(`Failed to delete local file ${file}: ${err.message}`);
         }
       }
     }
 
-    // Delete old S3 objects
+    // Clean up existing S3 objects
     const s3Objects = await s3.listObjectsV2({
       Bucket: s3Bucket,
       Prefix: `audio_${videoId}`
@@ -99,20 +134,54 @@ async function extractAudio(videoUrl) {
       logger.debug(`Deleted ${s3Objects.Contents.length} S3 objects for ${videoId}`);
     }
 
-    // Extract audio using yt-dlp
-    logger.info(`Extracting audio for ${videoUrl}`);
-    await ytDlp(videoUrl, {
-      extractAudio: true,
-      audioFormat: 'mp3',
-      output: tempFile,
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-      referer: 'https://www.youtube.com/',
-      cookies: path.resolve(__dirname, '../cookies/youtube_cookies.txt'),
-    }, {
-      execPath: ytDlpPath
-    });
+    // Extract audio with retry logic
+    const maxRetries = 3;
+    let attempt = 0;
+    let audioExtracted = false;
+    let errorMessage = '';
 
-    logger.debug(`yt-dlp downloaded audio for ${videoId} to ${tempFile}`);
+    while (attempt < maxRetries && !audioExtracted) {
+      attempt++;
+      logger.info(`Attempt ${attempt} to extract audio for ${videoUrl} using yt-dlp binary: ${ytDlpPath}`);
+      try {
+        const startExtract = Date.now();
+        await ytDlp(videoUrl, {
+          extractAudio: true,
+          audioFormat: 'mp3',
+          output: tempFile,
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+          referer: 'https://www.youtube.com/',
+          cookies: cookiesPath
+        }, {
+          execPath: ytDlpPath
+        });
+        logger.debug(`yt-dlp downloaded audio for ${videoId} to ${tempFile} in ${Date.now() - startExtract}ms`);
+        audioExtracted = true;
+      } catch (error) {
+        errorMessage = error.message;
+        if (error.stderr?.includes('HTTP Error 429')) {
+          logger.warn(`Rate limit hit on attempt ${attempt} for ${videoId}: ${error.stderr}`);
+          if (attempt < maxRetries) {
+            const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
+            logger.info(`Retrying after ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        } else if (error.stderr?.includes('This content isn’t available')) {
+          logger.error(`Video ${videoId} is unavailable: ${error.stderr}`);
+          throw new Error(`Video unavailable: ${error.message}`);
+        } else {
+          logger.error(`yt-dlp failed for ${videoId}: ${error.message}`);
+          throw error;
+        }
+      }
+    }
+
+    if (!audioExtracted) {
+      logger.error(`Failed to extract audio for ${videoId} after ${maxRetries} attempts: ${errorMessage}`);
+      throw new Error(`Failed to extract audio after ${maxRetries} attempts: ${errorMessage}`);
+    }
+
+    await fsPromises.access(tempFile);
 
     // Upload mp3 to S3
     const mp3Key = `audio_${videoId}.mp3`;
@@ -129,6 +198,9 @@ async function extractAudio(videoUrl) {
     if (audioChunks.length === 0) {
       logger.error(`No audio chunks created for ${videoId}`);
       throw new Error('No audio chunks created');
+    }
+    if (audioChunks.length === 1) {
+      logger.warn(`Only one audio chunk created for ${videoId}. Video may be short or segmentation failed.`);
     }
 
     const s3Keys = [];
@@ -147,19 +219,17 @@ async function extractAudio(videoUrl) {
     logger.info(`Uploaded ${audioChunks.length} chunks to S3`);
     return s3Keys.map(key => `s3://${s3Bucket}/${key}`);
   } catch (error) {
-    logger.error(`Audio extraction failed for ${videoId}:`, error);
+    logger.error(`Audio extraction failed for ${videoId}: ${error.message}`);
     throw new Error(`Failed to extract audio: ${error.message}`);
   } finally {
-    // Clean up local files
     try {
       await fsPromises.unlink(tempFile);
       logger.debug(`Deleted local temp file: ${tempFile}`);
     } catch (err) {
       if (err.code !== 'ENOENT') {
-        logger.warn(`Failed to delete local temp file ${tempFile}:`, err.message);
+        logger.warn(`Failed to delete local temp file ${tempFile}: ${err.message}`);
       }
     }
-
     const localChunks = await fsPromises.readdir(outputDir).catch(() => []);
     for (const file of localChunks) {
       if (file.includes(videoId) && file.endsWith('.wav')) {
@@ -167,7 +237,7 @@ async function extractAudio(videoUrl) {
           await fsPromises.unlink(path.join(outputDir, file));
           logger.debug(`Deleted local chunk: ${file}`);
         } catch (err) {
-          logger.warn(`Failed to delete local chunk ${file}:`, err.message);
+          logger.warn(`Failed to delete local chunk ${file}: ${err.message}`);
         }
       }
     }
@@ -175,7 +245,7 @@ async function extractAudio(videoUrl) {
 }
 
 async function cleanupAudio(s3Uris) {
-  const s3Bucket = process.env.AWS_S3_BUCKET;
+  const s3Bucket = process.env.AWS_S3_BUCKET || 'focuslearn-audio-2025';
   const maxRetries = 3;
 
   for (const uri of s3Uris) {
@@ -188,7 +258,7 @@ async function cleanupAudio(s3Uris) {
         break;
       } catch (err) {
         attempts++;
-        logger.warn(`Failed to delete S3 object ${key} (attempt ${attempts}):`, err.message);
+        logger.warn(`Failed to delete S3 object ${key} (attempt ${attempts}): ${err.message}`);
         if (attempts >= maxRetries) {
           logger.error(`Failed to delete S3 object ${key} after ${maxRetries} attempts`);
         }
