@@ -1,10 +1,15 @@
-const ytDlpExec = require('yt-dlp-exec');
+// const ytDlpExec = require('yt-dlp-exec');
 const path = require('path');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const AWS = require('aws-sdk');
 const ffmpeg = require('fluent-ffmpeg');
 const { logger } = require('../config/logger');
+const { spawn } = require('child_process');
+
+const args = [videoUrl, '--extract-audio', '--audio-format', 'mp3', ...];
+
+const process = spawn(ytDlpPath, args);
 
 // set paths to local binaries in backend/bin
 const ffmpegPath = path.resolve(__dirname, '../bin/ffmpeg');
