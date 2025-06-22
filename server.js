@@ -22,7 +22,6 @@ const env = cleanEnv(process.env, {
   AWS_S3_BUCKET: str({ default: 'focuslearn-audio-2025' })
 });
 
-// Enhanced rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -38,7 +37,6 @@ app.use(limiter);
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Request logging
 app.use((req, res, next) => {
   logger.info(`${req.method} ${req.path}`);
   next();
@@ -46,34 +44,57 @@ app.use((req, res, next) => {
 
 connectDB();
 
-// Routes
 app.use('/', videoRoutes);
 app.use('/', playlistRoutes);
 app.use('/', queryRoutes);
 app.use('/', noteRoutes);
 
-// Enhanced error handling
+
 app.use((err, req, res, next) => {
-  if (err.message.includes('rate limit')) {
-    logger.warn(`Rate limit error: ${err.message}`);
-    return res.status(429).json({ 
-      error: 'YouTube rate limit reached',
-      solution: 'Please try again later or use YouTube API key'
+  if (err instanceof EnhancedError) {
+    logger.error(`Enhanced Error: ${err.message}`, {
+      originalError: err.originalError.message,
+      context: err.context
     });
+    
+    if (err.originalError.message.includes('rate limit')) {
+      return res.status(429).json({
+        error: 'YouTube rate limit reached',
+        details: 'Our system has hit YouTube download limits',
+        solution: 'Please try again in a few hours',
+        retryAfter: '3600' 
+      });
+    }
   }
-  
-  if (err.message.includes('unavailable') || err.message.includes('private')) {
-    logger.warn(`Content unavailable: ${err.message}`);
+
+  if (err.message.includes('unavailable') || 
+      err.message.includes('private') ||
+      err.message.includes('restricted')) {
+    logger.warn(`Content restriction: ${err.message}`);
     return res.status(403).json({
       error: 'Video unavailable',
-      details: 'This video may be age-restricted or private'
+      details: 'This video may be age-restricted, private, or blocked',
+      solution: 'Try a different video or check availability'
     });
   }
 
-  logger.error(`Server error: ${err.stack}`);
-  res.status(500).json({ 
+  if (err.message.includes('File too small')) {
+    logger.error(`Download verification failed: ${err.message}`);
+    return res.status(502).json({
+      error: 'Download incomplete',
+      details: 'The audio download did not complete successfully',
+      solution: 'Please try again'
+    });
+  }
+
+
+  logger.error(`Server Error: ${err.stack}`);
+  res.status(500).json({
     error: 'Internal server error',
-    ...(process.env.NODE_ENV === 'development' && { details: err.message })
+    ...(process.env.NODE_ENV === 'development' && { 
+      details: err.message,
+      stack: err.stack 
+    })
   });
 });
 
