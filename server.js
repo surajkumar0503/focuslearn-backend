@@ -17,30 +17,20 @@ const env = cleanEnv(process.env, {
   MONGODB_URI: str(),
   GROQ_API_KEY: str(),
   YOUTUBE_API_KEY: str(),
-  YT_PROXY: str({ default: '' }),
-  USE_YOUTUBE_COOKIES: str({ default: 'false' }),
-  AWS_S3_BUCKET: str({ default: 'focuslearn-audio-2025' })
 });
 
+// rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: {
-    error: 'Rate limit exceeded',
-    message: 'Too many requests from this IP, please try again later.'
-  },
+  windowMs: 15 * 60 * 1000, 
+  max: 50, 
+  message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
 });
-
 app.use(limiter);
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
 
-app.use((req, res, next) => {
-  logger.info(`${req.method} ${req.path}`);
-  next();
-});
+app.use(cors());
+app.use(express.json({ limit: '10mb' })); 
 
 connectDB();
 
@@ -49,58 +39,14 @@ app.use('/', playlistRoutes);
 app.use('/', queryRoutes);
 app.use('/', noteRoutes);
 
-
 app.use((err, req, res, next) => {
-  if (err instanceof EnhancedError) {
-    logger.error(`Enhanced Error: ${err.message}`, {
-      originalError: err.originalError.message,
-      context: err.context
-    });
-    
-    if (err.originalError.message.includes('rate limit')) {
-      return res.status(429).json({
-        error: 'YouTube rate limit reached',
-        details: 'Our system has hit YouTube download limits',
-        solution: 'Please try again in a few hours',
-        retryAfter: '3600' 
-      });
-    }
-  }
-
-  if (err.message.includes('unavailable') || 
-      err.message.includes('private') ||
-      err.message.includes('restricted')) {
-    logger.warn(`Content restriction: ${err.message}`);
-    return res.status(403).json({
-      error: 'Video unavailable',
-      details: 'This video may be age-restricted, private, or blocked',
-      solution: 'Try a different video or check availability'
-    });
-  }
-
-  if (err.message.includes('File too small')) {
-    logger.error(`Download verification failed: ${err.message}`);
-    return res.status(502).json({
-      error: 'Download incomplete',
-      details: 'The audio download did not complete successfully',
-      solution: 'Please try again'
-    });
-  }
-
-
-  logger.error(`Server Error: ${err.stack}`);
-  res.status(500).json({
-    error: 'Internal server error',
-    ...(process.env.NODE_ENV === 'development' && { 
-      details: err.message,
-      stack: err.stack 
-    })
-  });
+  logger.error(`Global error: ${err.message}, Stack: ${err.stack}`);
+  res.status(500).json({ error: 'Internal server error', details: err.message });
 });
 
 const server = app.listen(env.PORT, () => {
   logger.info(`Server running on port ${env.PORT}`);
 });
 
-server.keepAliveTimeout = 120000;
-server.headersTimeout = 120000;
+server.keepAliveTimeout = 120000; 
+server.headersTimeout = 120000; 
