@@ -26,19 +26,38 @@ const s3 = new AWS.S3({
   region: process.env.AWS_REGION || 'ap-south-1'
 });
 
-// Ensure cookies directory exists
-const cookiesPath = path.resolve(__dirname, '../cookies/youtube_cookies.txt').replace(/\\/g, '/');
-const cookiesDir = path.dirname(cookiesPath);
-async function ensureCookiesDir() {
-  try {
-    await fsPromises.mkdir(cookiesDir, { recursive: true });
-    if (!fs.existsSync(cookiesPath)) {
-      await fsPromises.writeFile(cookiesPath, '');
-      logger.debug(`Created empty cookies file: ${cookiesPath}`);
+// Cookie file handling - modified to be optional
+const USE_COOKIES = process.env.USE_YOUTUBE_COOKIES === 'true';
+let cookiesPath = null;
+
+if (USE_COOKIES) {
+  cookiesPath = path.resolve(__dirname, '../cookies/youtube_cookies.txt').replace(/\\/g, '/');
+  const cookiesDir = path.dirname(cookiesPath);
+  
+  async function ensureCookiesDir() {
+    try {
+      await fsPromises.mkdir(cookiesDir, { recursive: true });
+      if (!fs.existsSync(cookiesPath)) {
+        // Create a valid Netscape format cookies file
+        await fsPromises.writeFile(cookiesPath, 
+          "# Netscape HTTP Cookie File\n" +
+          "# This is a generated file! Do not edit.\n" +
+          "# To use YouTube cookies, add them below this line\n\n"
+        );
+        logger.debug(`Created valid empty cookies file: ${cookiesPath}`);
+      } else {
+        // Verify existing cookies file is valid
+        const content = await fsPromises.readFile(cookiesPath, 'utf8');
+        if (!content.startsWith('# Netscape HTTP Cookie File')) {
+          logger.warn('Existing cookies file is not in Netscape format, backing up and creating new one');
+          await fsPromises.rename(cookiesPath, `${cookiesPath}.bak`);
+          await ensureCookiesDir(); // Recursive call to create new file
+        }
+      }
+    } catch (err) {
+      logger.error(`Failed to initialize cookies: ${err.message}`);
+      throw new Error(`Failed to initialize cookies: ${err.message}`);
     }
-  } catch (err) {
-    logger.error(`Failed to create cookies directory or file: ${err.message}`);
-    throw new Error(`Failed to initialize cookies: ${err.message}`);
   }
 }
 
@@ -102,9 +121,13 @@ async function extractAudio(videoUrl) {
   const s3Bucket = process.env.AWS_S3_BUCKET || 'focuslearn-audio-2025';
 
   try {
-    // Create temp and cookies directories
+    // Create temp directory
     await fsPromises.mkdir(outputDir, { recursive: true });
-    await ensureCookiesDir();
+    
+    // Initialize cookies if needed
+    if (USE_COOKIES) {
+      await ensureCookiesDir();
+    }
 
     // Clean up existing local files
     const existingFiles = await fsPromises.readdir(outputDir).catch(() => []);
@@ -134,6 +157,20 @@ async function extractAudio(videoUrl) {
       logger.debug(`Deleted ${s3Objects.Contents.length} S3 objects for ${videoId}`);
     }
 
+    // Prepare yt-dlp options
+    const ytDlpOptions = {
+      extractAudio: true,
+      audioFormat: 'mp3',
+      output: tempFile,
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+      referer: 'https://www.youtube.com/'
+    };
+
+    // Add cookies only if enabled and file exists
+    if (USE_COOKIES && fs.existsSync(cookiesPath)) {
+      ytDlpOptions.cookies = cookiesPath;
+    }
+
     // Extract audio with retry logic
     const maxRetries = 3;
     let attempt = 0;
@@ -145,14 +182,7 @@ async function extractAudio(videoUrl) {
       logger.info(`Attempt ${attempt} to extract audio for ${videoUrl} using yt-dlp binary: ${ytDlpPath}`);
       try {
         const startExtract = Date.now();
-        await ytDlp(videoUrl, {
-          extractAudio: true,
-          audioFormat: 'mp3',
-          output: tempFile,
-          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-          referer: 'https://www.youtube.com/',
-          cookies: cookiesPath
-        }, {
+        await ytDlp(videoUrl, ytDlpOptions, {
           execPath: ytDlpPath
         });
         logger.debug(`yt-dlp downloaded audio for ${videoId} to ${tempFile} in ${Date.now() - startExtract}ms`);
@@ -166,9 +196,12 @@ async function extractAudio(videoUrl) {
             logger.info(`Retrying after ${delay}ms...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
-        } else if (error.stderr?.includes('This content isn’t available')) {
+        } else if (error.stderr?.includes('This content is not available')) {
           logger.error(`Video ${videoId} is unavailable: ${error.stderr}`);
           throw new Error(`Video unavailable: ${error.message}`);
+        } else if (error.message.includes('cookies')) {
+          logger.warn(`Cookie-related error, retrying without cookies`);
+          delete ytDlpOptions.cookies; // Remove cookies option if it's causing issues
         } else {
           logger.error(`yt-dlp failed for ${videoId}: ${error.message}`);
           throw error;
