@@ -1,19 +1,6 @@
 const ffmpeg = require('fluent-ffmpeg');
 const path = require('path');
-const winston = require('winston');
-
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.File({ filename: 'error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'combined.log' }),
-    new winston.transports.Console()
-  ]
-});
+const { logger } = require('../config/logger');
 
 async function preprocessAudio(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
