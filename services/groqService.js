@@ -12,7 +12,7 @@ async function getGroqResponse({ videoId, query, transcript }) {
       let context = '';
       if (transcript?.length) {
         context = transcript.map(item => item.text).join(' ');
-        const maxTokenEstimate = 10000; // further reduced for long videos
+        const maxTokenEstimate = 10000; 
         const words = context.split(/\s+/);
         if (words.length > maxTokenEstimate * 0.75) {
           logger.info(`Transcript for ${videoId} too long (${words.length} words), preprocessing`);
