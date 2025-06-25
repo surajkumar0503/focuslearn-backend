@@ -9,37 +9,37 @@ async function getGroqResponse({ videoId, query, transcript }) {
 
   while (attempts < maxRetries) {
     try {
-      if (!transcript?.length) {
-        logger.error(`No transcript available for video ${videoId}`);
-        throw new Error('No transcript available for query processing');
-      }
-
-      let context = transcript.map(item => item.text).join(' ');
-      const maxTokenEstimate = 10000; // further reduced for long videos
-      const words = context.split(/\s+/);
-      if (words.length > maxTokenEstimate * 0.75) {
-        logger.info(`Transcript for ${videoId} too long (${words.length} words), preprocessing`);
-        if (query.toLowerCase().includes('summary') || query.toLowerCase().includes('key points')) {
-          const keySentencesPrompt = `Extract 10-15 key sentences from the transcript: "${context.slice(0, 30000)}". Return as a concise list.`;
-          const startTime = Date.now();
-          const keySentencesResponse = await Promise.race([
-            groq.chat.completions.create({
-              messages: [
-                { role: 'system', content: 'You are a summarization expert.' },
-                { role: 'user', content: keySentencesPrompt }
-              ],
-              model: 'llama-3.3-70b-versatile',
-              max_tokens: 500,
-              temperature: 0.3
-            }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Key sentences timeout')), 60000))
-          ]);
-          logger.info(`Key sentences extracted in ${Date.now() - startTime}ms`);
-          context = keySentencesResponse.choices[0]?.message?.content || context.slice(0, maxTokenEstimate * 4);
-        } else {
-          context = context.slice(0, maxTokenEstimate * 4);
+      let context = '';
+      if (transcript?.length) {
+        context = transcript.map(item => item.text).join(' ');
+        const maxTokenEstimate = 10000; // further reduced for long videos
+        const words = context.split(/\s+/);
+        if (words.length > maxTokenEstimate * 0.75) {
+          logger.info(`Transcript for ${videoId} too long (${words.length} words), preprocessing`);
+          if (query.toLowerCase().includes('summary') || query.toLowerCase().includes('key points')) {
+            const keySentencesPrompt = `Extract 10-15 key sentences from the transcript: "${context.slice(0, 30000)}". Return as a concise list.`;
+            const startTime = Date.now();
+            const keySentencesResponse = await Promise.race([
+              groq.chat.completions.create({
+                messages: [
+                  { role: 'system', content: 'You are a summarization expert.' },
+                  { role: 'user', content: keySentencesPrompt }
+                ],
+                model: 'llama-3.3-70b-versatile',
+                max_tokens: 500,
+                temperature: 0.3
+              }),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Key sentences timeout')), 60000))
+            ]);
+            logger.info(`Key sentences extracted in ${Date.now() - startTime}ms`);
+            context = keySentencesResponse.choices[0]?.message?.content || context.slice(0, maxTokenEstimate * 4);
+          } else {
+            context = context.slice(0, maxTokenEstimate * 4);
+          }
+          logger.info(`Truncated transcript to ${context.length} chars for ${videoId}`);
         }
-        logger.info(`Truncated transcript to ${context.length} chars for ${videoId}`);
+      } else {
+        logger.info(`No transcript available for video ${videoId}, query will rely on video metadata`);
       }
 
       const prompt = query.toLowerCase().includes('key points')
