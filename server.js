@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const connectDB = require('./config/db');
 const { cleanEnv, str, port } = require('envalid');
 const { logger } = require('./config/logger');
+const PORT = process.env.PORT || 5000;
 require('dotenv').config();
 
 const videoRoutes = require('./routes/videoRoutes');
@@ -45,7 +46,7 @@ app.use((err, req, res, next) => {
 });
 
 const server = app.listen(env.PORT, () => {
-  logger.info(`Server running on port ${env.PORT}`);
+  logger.info(`Server running in ${process.env.NODE_ENV || 'undefined'} mode on port ${PORT}`);
 });
 
 server.keepAliveTimeout = 120000; 
