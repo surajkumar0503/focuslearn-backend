@@ -18,28 +18,42 @@ const answerQuery = async (query, video_id) => {
     const transcript = await fetchTranscript(video_id);
     const videoDetails = await fetchVideoDetails(video_id);
     const title = videoDetails?.title || `Video ID: ${video_id}`;
+    const description = videoDetails?.description || '';
 
-    // limit transcript to 2000 characters for context
-    const formattedTranscript = transcript ? formatTranscript(transcript) : null;
-    const summarizedTranscript = formattedTranscript
-      ? summarizeTranscript(formattedTranscript.slice(0, 2000))
-      : null;
+    // handle transcript availability
+    let formattedTranscript = null;
+    let summarizedTranscript = null;
     const transcriptAvailable = !!transcript;
+
+    if (transcriptAvailable) {
+      formattedTranscript = formatTranscript(transcript);
+      summarizedTranscript = summarizeTranscript(formattedTranscript.slice(0, 2000));
+    }
+
     console.log(`Transcript available: ${transcriptAvailable}`);
 
-    // prepare prompt
-    const systemMessage = new HumanMessage(
-      "You are a helpful assistant that answers user queries based on the given input query " +
-      "if video length is long then always provide maximum words response answer. " +
-      "For queries requesting key points or important points, provide answer in the form of points which will be important " +
-      "For queries requesting a summary, provide a detailed overview " +
-      "of the video's content, including key points, main topics, and examples, in 3-5 paragraphs. " +
-      "For other queries, provide a precise, detailed, and concise response using the transcript as the " 
-    );
+    // prompt based on transcript availability
+    const systemMessageContent = transcriptAvailable
+      ? "You are a helpful assistant that answers user queries based on the given input query " +
+        "if video length is long then always provide maximum words response answer. " +
+        "For queries requesting key points or important points, provide answer in the form of points which will be important " +
+        "For queries requesting a summary, provide a detailed overview " +
+        "of the video's content, including key points, main topics, and examples, in 3-5 paragraphs. " +
+        "For other queries, provide a precise, detailed, and concise response using the transcript as the " +
+        "primary source."
+      : "You are a helpful assistant that answers user queries based on the given input query. " +
+        "Since the transcript is unavailable, use the video title and description to provide a detailed and relevant answer. " +
+        "For queries requesting key points or important points, provide a list of inferred points based on the title and description. " +
+        "For queries requesting a summary, provide a concise overview inferred from the title and description in 2-3 paragraphs. " +
+        "For other queries, provide a precise and detailed response inferred from the title and description.";
 
-    const humanMessage = new HumanMessage(
-      `Title: ${title}\nTranscript: ${summarizedTranscript || 'Not available'}\nQuery: ${query}`
-    );
+    const systemMessage = new HumanMessage(systemMessageContent);
+
+    const humanMessageContent = transcriptAvailable
+      ? `Title: ${title}\nTranscript: ${summarizedTranscript || 'Not available'}\nQuery: ${query}`
+      : `Title: ${title}\nDescription: ${description}\nQuery: ${query}`;
+
+    const humanMessage = new HumanMessage(humanMessageContent);
 
     // initialize primary model
     const llm = new ChatGroq({
