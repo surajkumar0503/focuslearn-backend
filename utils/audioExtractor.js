@@ -106,7 +106,7 @@ async function extractAudio(videoUrl) {
     logger.error(`Audio extraction failed for ${videoId}:`, error);
     throw new Error(`Failed to extract audio: ${error.message}`);
   } finally {
-    // clean up temp mp3 file
+    // clean up temp chunk file
     try {
       await fs.unlink(tempFile);
       logger.info(`Deleted temp file: ${tempFile}`);
