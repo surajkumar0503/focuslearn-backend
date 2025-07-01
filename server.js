@@ -20,7 +20,7 @@ const env = cleanEnv(process.env, {
   YOUTUBE_API_KEY: str(),
 });
 
-// rate limiting
+
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, 
   max: 50, 

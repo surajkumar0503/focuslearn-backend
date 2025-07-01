@@ -5,5 +5,3 @@ node_modules/
 temp/
 error.log
 combined.log
-/tmp/
-tmp/

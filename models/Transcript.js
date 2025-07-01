@@ -9,7 +9,7 @@ const transcriptSchema = new mongoose.Schema({
       duration: Number
     }
   ],
-  createdAt: { type: Date, default: Date.now, index: { expires: '30d' } } //explicit TTL index
+  createdAt: { type: Date, default: Date.now, index: { expires: '30d' } } 
 });
 
 module.exports = mongoose.model('Transcript', transcriptSchema);

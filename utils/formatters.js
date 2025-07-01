@@ -23,5 +23,4 @@ const formatTime = (seconds) => {
     return transcript;
   };
   
-  module.exports = { formatTime, formatTranscript, summarizeTranscript };
-  
+  module.exports = { formatTime, formatTranscript, summarizeTranscript }; 
